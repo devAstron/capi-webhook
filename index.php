@@ -4,7 +4,7 @@
 // ============================================================
 define('FB_PIXEL_ID',     getenv('FB_PIXEL_ID'));
 define('FB_ACCESS_TOKEN', getenv('FB_ACCESS_TOKEN'));
-define('FB_API_VERSION',  'v19.0');
+define('FB_API_VERSION',  'v25.0');
 
 define('STATUS_MAP', [
     // ═══ WoodlyWorld B2C (5745133) ═══
