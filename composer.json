@@ -1,0 +1,7 @@
+{
+    "name": "woodlyworld/capi-webhook",
+    "description": "Facebook CAPI webhook for amoCRM",
+    "require": {
+        "php": ">=8.1"
+    }
+}
