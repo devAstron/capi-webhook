@@ -121,10 +121,20 @@ function extractLeadData(array $data): array
         ?? $data['contacts'][0]
         ?? [];
 
-    $phone = '';
-    $email = '';
-    $name  = $contact['name'] ?? ($lead['name'] ?? '');
+    $phone      = '';
+    $email      = '';
+    $firstName  = '';
+    $lastName   = '';
+    $name       = $contact['name'] ?? ($lead['name'] ?? '');
 
+    // Ism va familiyani ajratish
+    if (!empty($name)) {
+        $parts     = explode(' ', trim($name), 2);
+        $firstName = $parts[0] ?? '';
+        $lastName  = $parts[1] ?? '';
+    }
+
+    // Custom fields dan telefon va email olish
     foreach ($contact['custom_fields'] ?? [] as $field) {
         $code  = strtoupper($field['code']  ?? '');
         $fname = strtolower($field['name']  ?? '');
@@ -138,16 +148,40 @@ function extractLeadData(array $data): array
         }
     }
 
+    // Lead custom fields dan ham qidirish
+    foreach ($lead['custom_fields'] ?? [] as $field) {
+        $code  = strtoupper($field['code']  ?? '');
+        $fname = strtolower($field['name']  ?? '');
+        $val   = $field['values'][0]['value'] ?? '';
+
+        if (empty($phone) && ($code === 'PHONE' || str_contains($fname, 'тел'))) {
+            $phone = $val;
+        }
+        if (empty($email) && ($code === 'EMAIL' || str_contains($fname, 'email'))) {
+            $email = $val;
+        }
+    }
+
+    $leadId = $lead['id'] ?? uniqid('lead_');
+
+    // fbc yasash: Facebook Click ID formatida lead ID dan
+    // Format: fb.1.{timestamp}.{lead_id}
+    $fbc = 'fb.1.' . (string)(($lead['created_at'] ?? time()) * 1000) . '.' . $leadId;
+
     return [
-        'lead_id'     => $lead['id']          ?? uniqid('lead_'),
+        'lead_id'     => $leadId,
         'status_id'   => $lead['status_id']   ?? null,
         'pipeline_id' => $lead['pipeline_id'] ?? null,
-        'name'        => trim($name),
+        'first_name'  => trim($firstName),
+        'last_name'   => trim($lastName),
         'phone'       => normalizePhone($phone),
         'email'       => strtolower(trim($email)),
         'created_at'  => $lead['created_at']  ?? time(),
-        'ip'          => $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'] ?? '',
+        'ip'          => $_SERVER['HTTP_X_FORWARDED_FOR']
+                            ? explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0]
+                            : ($_SERVER['REMOTE_ADDR'] ?? ''),
         'user_agent'  => $_SERVER['HTTP_USER_AGENT'] ?? '',
+        'fbc'         => $fbc,
     ];
 }
 
@@ -171,31 +205,47 @@ function sendToFacebookCAPI(array $lead, string $eventName, ?string $customEvent
         FB_ACCESS_TOKEN
     );
 
+    // ── User Data ──────────────────────────────────────────
     $userData = [
         'client_ip_address' => $lead['ip'],
         'client_user_agent' => $lead['user_agent'],
+        // External ID — lead ID ni hash qilib yuborish (+24%)
+        'external_id'       => [h((string)$lead['lead_id'])],
+        // fbc — Facebook Click ID formatida (+32%)
+        'fbc'               => $lead['fbc'],
     ];
 
-    if ($lead['email'])  $userData['em'] = [h($lead['email'])];
-    if ($lead['phone'])  $userData['ph'] = [$lead['phone']];   // allaqachon hash
-    if ($lead['name']) {
-        $parts = explode(' ', $lead['name'], 2);
-        $userData['fn'] = [h($parts[0])];
-        if (!empty($parts[1])) $userData['ln'] = [h($parts[1])];
+    if (!empty($lead['email'])) {
+        $userData['em'] = [h($lead['email'])];
+    }
+    if (!empty($lead['phone'])) {
+        $userData['ph'] = [$lead['phone']]; // allaqachon hash qilingan
+    }
+    if (!empty($lead['first_name'])) {
+        $userData['fn'] = [h($lead['first_name'])];
+    }
+    if (!empty($lead['last_name'])) {
+        $userData['ln'] = [h($lead['last_name'])];
     }
 
-    $customData = ['lead_id' => (string)$lead['lead_id']];
+    // ── Custom Data ────────────────────────────────────────
+    $customData = [
+        'lead_id' => (string)$lead['lead_id'],
+    ];
+
     if ($eventName === 'Purchase') {
         $customData['currency'] = 'UZS';
-        $customData['value']    = 1;
+        $customData['value']    = 1; // real summa bo'lsa shu yerga
     }
 
+    // ── Event ──────────────────────────────────────────────
     $event = [
-        'event_name'    => $eventName,
-        'event_time'    => (int)$lead['created_at'],
-        'action_source' => 'crm',
-        'user_data'     => $userData,
-        'custom_data'   => $customData,
+        'event_name'       => $eventName,
+        'event_time'       => (int)$lead['created_at'],
+        'action_source'    => 'crm',        // CRM dan kelayotgani uchun
+        'event_id'         => 'lead_' . $lead['lead_id'] . '_' . $eventName, // dublikatlarni oldini olish
+        'user_data'        => $userData,
+        'custom_data'      => $customData,
     ];
 
     if ($eventName === 'CustomEvent' && $customEventName) {
@@ -204,6 +254,7 @@ function sendToFacebookCAPI(array $lead, string $eventName, ?string $customEvent
 
     $payload = json_encode(['data' => [$event]]);
 
+    // ── cURL ───────────────────────────────────────────────
     $ch = curl_init($url);
     curl_setopt_array($ch, [
         CURLOPT_POST           => true,
@@ -222,12 +273,13 @@ function sendToFacebookCAPI(array $lead, string $eventName, ?string $customEvent
 
     log_write('fb_log.txt',
         "EVENT: {$eventName}" . ($customEventName ? "({$customEventName})" : '') .
-        " | HTTP: {$httpCode}\nPayload: {$payload}\nResponse: {$response}"
+        " | HTTP: {$httpCode}\n" .
+        "Payload: {$payload}\n" .
+        "Response: {$response}"
     );
 
     return json_decode($response, true) ?? [];
 }
-
 function log_write(string $file, string $message): void
 {
     $line = date('Y-m-d H:i:s') . "\n" . $message . "\n" . str_repeat('-', 60) . "\n\n";
